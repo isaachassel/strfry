@@ -129,10 +129,10 @@ struct MsgYesstr : NonCopyable {
     MsgYesstr(Var &&msg_) : msg(std::move(msg_)) {}
 };
 
-
 struct RelayServer {
     std::unique_ptr<uS::Async> hubTrigger;
-
+    std::unordered_map<uint64_t, bool> authStates; //NIP-42
+    flat_hash_map<uint64_t, std::string> challengeStrings; //NIP-42
     // Thread Pools
 
     ThreadPool<MsgWebsocket> tpWebsocket;
@@ -206,4 +206,21 @@ struct RelayServer {
         tpWebsocket.dispatch(0, MsgWebsocket{MsgWebsocket::Send{connId, std::move(tao::json::to_string(reply))}});
         hubTrigger->send();
     }
+
+    void setAuthState(uint64_t connId, bool isAuthenticated) {
+        auto it = authStates.find(connId);
+        if (it != authStates.end()) {
+            it->second = isAuthenticated;
+        } else {
+            authStates.emplace(connId, isAuthenticated);
+        }
+    }
+
+    bool isClientAuthenticated(secp256k1_context *secpCtx, const std::string signedChallenge, const std::string &challengeHash, const std::string &client_pub_key);
 };
+
+inline bool RelayServer::isClientAuthenticated(secp256k1_context *secpCtx, const std::string signedChallenge, const std::string &challengeHash, const std::string &client_pub_key) {
+
+    // Use the verifySig method from events.cpp
+    return verifySig(secpCtx, signedChallenge, challengeHash, client_pub_key);
+}

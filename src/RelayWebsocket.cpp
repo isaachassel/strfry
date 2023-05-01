@@ -1,3 +1,4 @@
+#include <random>
 #include "RelayServer.h"
 
 #include "app_git_version.h"
@@ -16,6 +17,17 @@ static std::string preGenerateHttpResponse(const std::string &contentType, const
     return output;
 };
 
+// Generate a cryptographically secure pseudo-random string of length 32 consisting of hexadecimal digits.
+static std::string generateChallengeString() {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> dis(0, 15);
+    std::string challenge;
+    for (int i = 0; i < 32; ++i) {
+        challenge += "0123456789abcdef"[dis(gen)];
+    }
+    return challenge;
+}
 
 
 void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
@@ -119,6 +131,12 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
                 LW << "Failed to enable TCP keepalive: " << strerror(errno);
             }
         }
+
+        // Authenticate Client NIP-42
+        std::string challenge = generateChallengeString();
+        challengeStrings[connId] = challenge;  
+        std::string authMessage = "[\"AUTH\",\"" + challenge + "\"]";
+        ws->send(authMessage.data(), authMessage.size(), uWS::OpCode::TEXT);
     });
 
     hubGroup->onDisconnection([&](uWS::WebSocket<uWS::SERVER> *ws, int code, char *message, size_t length) {

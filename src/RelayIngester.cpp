@@ -1,4 +1,5 @@
 #include "RelayServer.h"
+#include "events.h"
 
 
 void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
@@ -25,7 +26,24 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
 
                         auto &cmd = arr[0].get_string();
 
-                        if (cmd == "EVENT") {
+                        if (cmd == "AUTH") {
+                            if (arr.size() != 3) {
+                                throw herr("invalid AUTH message format");
+                            }
+
+                            std::string publicKey = arr[1].get_string();
+                            std::string signature = arr[2].get_string();
+                            std::string challengeHash = challengeStrings[msg->connId];
+
+                            if (verifySig(secpCtx, signature, challengeHash, publicKey)) {
+                                setAuthState(msg->connId, true);
+                                sendOKResponse(msg->connId, "AUTH", true, "authentication successful");
+                            } else {
+                                setAuthState(msg->connId, true);
+                                sendNoticeError(msg->connId, "authentication failed: invalid signature");
+                                //closeConnection(connId); //TODO do we want to close connection if client is not authenticated or something else?
+                            } 
+                        } else if (cmd == "EVENT") {
                             if (cfg().relay__logging__dumpInEvents) LI << "[" << msg->connId << "] dumpInEvent: " << msg->payload; 
 
                             try {

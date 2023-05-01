@@ -166,6 +166,13 @@ config:
     desc: "Maximum number of subscriptions (concurrent REQs) a connection can have open at any time"
     default: 20
 
+  - name: relay__authorization__nip42__auth
+    desc: "Enable NIP-42 authentication" 
+    default: true
+  - name: relay__authorization__nip42__dms
+    desc: "Send DMs to everybody"
+    default: true
+
   - name: relay__writePolicy__plugin
     desc: "If non-empty, path to an executable script that implements the writePolicy plugin logic"
     default: ""
