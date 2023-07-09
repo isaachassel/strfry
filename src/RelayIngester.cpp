@@ -1,6 +1,76 @@
 #include "RelayServer.h"
 #include "events.h"
 
+struct AuthMessage {
+    std::string content;
+    unsigned created_at;
+    std::string id;
+    unsigned kind;
+    std::string pubkey;
+    std::string sig;
+    std::vector<std::vector<std::string>> tags;
+};
+
+
+std::string hex2bin(const std::string& hex) {
+    std::string bytes;
+    for (unsigned int i = 0; i < hex.length(); i += 2) {
+        std::string byteString = hex.substr(i, 2);
+        char byte = (char) strtol(byteString.c_str(), NULL, 16);
+        bytes += byte;
+    }
+    return bytes;
+}
+
+
+AuthMessage ParseAuthMessage(const tao::json::value& val) {
+    AuthMessage auth;
+
+    if (!val.is_object()) throw std::runtime_error("Message is not an object");
+
+    if (!val.at("content").is_string()) throw std::runtime_error("content is not a string");
+    auth.content = val.at("content").get_string();
+
+    if (!val.at("created_at").is_unsigned()) throw std::runtime_error("created_at is not an unsigned");
+    auth.created_at = val.at("created_at").get_unsigned();
+
+    if (!val.at("id").is_string()) throw std::runtime_error("id is not a string");
+    auth.id = val.at("id").get_string();
+
+    if (!val.at("kind").is_unsigned()) throw std::runtime_error("kind is not an unsigned");
+    auth.kind = val.at("kind").get_unsigned();
+
+    if (!val.at("pubkey").is_string()) throw std::runtime_error("pubkey is not a string");
+    auth.pubkey = val.at("pubkey").get_string();
+
+    if (!val.at("sig").is_string()) throw std::runtime_error("sig is not a string");
+    auth.sig = val.at("sig").get_string();
+
+    if (!val.at("tags").is_array()) throw std::runtime_error("tags is not an array");
+    for(const auto& tag_pair : val.at("tags").get_array()) {
+        if (!tag_pair.is_array() || tag_pair.get_array().size() != 2) throw std::runtime_error("bad tag pair");
+        std::vector<std::string> tag;
+        for(const auto& tag_element : tag_pair.get_array()) {
+            if (!tag_element.is_string()) throw std::runtime_error("tag element is not a string");
+            tag.push_back(tag_element.get_string());
+        }
+        auth.tags.push_back(tag);
+    }
+
+    // Debug output
+    std::cout << "Content: " << auth.content << "\n";
+    std::cout << "Created at: " << auth.created_at << "\n";
+    std::cout << "ID: " << auth.id << "\n";
+    std::cout << "Kind: " << auth.kind << "\n";
+    std::cout << "Public key: " << auth.pubkey << "\n";
+    std::cout << "Signature: " << auth.sig << "\n";
+    for (const auto &tag : auth.tags) {
+        std::cout << "Tag " << tag[0] << ": " << tag[1] << "\n";
+    }
+
+    return auth;
+}
+
 
 void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
     secp256k1_context *secpCtx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
@@ -27,15 +97,35 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
                         auto &cmd = arr[0].get_string();
 
                         if (cmd == "AUTH") {
-                            if (arr.size() != 3) {
+                            if (arr.size() != 2) {
                                 throw herr("invalid AUTH message format");
                             }
 
-                            std::string publicKey = arr[1].get_string();
-                            std::string signature = arr[2].get_string();
+                            AuthMessage authMessage = ParseAuthMessage(arr[1]);
+
+                            for (size_t i = 0; i < authMessage.tags.size(); ++i) {
+                                std::cout << "Tag " << i << ": ";
+                                for (const auto& tag_element : authMessage.tags[i]) {
+                                    std::cout << tag_element << " ";
+                                }
+                                std::cout << "\n";
+                            }
+
                             std::string challengeHash = challengeStrings[msg->connId];
 
-                            if (verifySig(secpCtx, signature, challengeHash, publicKey)) {
+                            std::cout << "Size of signature: " << authMessage.sig.size() << "\n";
+                            std::cout << "Size of challengeHash: " << challengeHash.size() << "\n";
+                            std::cout << "Size of public key: " << authMessage.pubkey.size() << "\n";
+
+                            std::string sigBin = hex2bin(authMessage.sig);
+                            std::string hashBin = hex2bin(challengeHash);
+                            std::string pubkeyBin = hex2bin(authMessage.pubkey);
+
+                            std::cout << "Size of signatureBin: " << sigBin.size() << "\n";
+                            std::cout << "Size of challengeHashBin: " << hashBin.size() << "\n";
+                            std::cout << "Size of public key Bin: " << pubkeyBin.size() << "\n";
+
+                            if (verifySig(secpCtx, sigBin, challengeHash, pubkeyBin)) {
                                 setAuthState(msg->connId, true);
                                 sendOKResponse(msg->connId, "AUTH", true, "authentication successful");
                             } else {
