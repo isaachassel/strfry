@@ -132,7 +132,9 @@ struct MsgYesstr : NonCopyable {
 struct RelayServer {
     std::unique_ptr<uS::Async> hubTrigger;
     std::unordered_map<uint64_t, bool> authStates; //NIP-42
-    flat_hash_map<uint64_t, std::string> challengeStrings; //NIP-42
+    std::unordered_map<uint64_t, std::string> challengeStrings; //NIP-42
+    std::unordered_set<std::string> authorizedPubKeys; //NIP-42
+    std::mutex authMtx; //NIP-42
     // Thread Pools
 
     ThreadPool<MsgWebsocket> tpWebsocket;
@@ -207,7 +209,27 @@ struct RelayServer {
         hubTrigger->send();
     }
 
+    bool isPubKeyAuth(const std::string& pubkey) {
+        std::lock_guard<std::mutex> lock(authMtx);
+        return authorizedPubKeys.find(pubkey) != authorizedPubKeys.end();
+    }
+
+    void authorizePubKey(const std::string& pubkey) {
+        std::lock_guard<std::mutex> lock(authMtx);
+        if(authorizedPubKeys.find(pubkey) == authorizedPubKeys.end()) {
+            authorizedPubKeys.insert(pubkey);
+        }
+    }
+
+    void unauthorizePubKey(const std::string& pubkey) {
+        std::lock_guard<std::mutex> lock(authMtx);
+        if(authorizedPubKeys.find(pubkey) != authorizedPubKeys.end()) {
+            authorizedPubKeys.erase(pubkey);
+        }
+    }
+
     void setAuthState(uint64_t connId, bool isAuthenticated) {
+        std::lock_guard<std::mutex> lock(authMtx);
         auto it = authStates.find(connId);
         if (it != authStates.end()) {
             it->second = isAuthenticated;

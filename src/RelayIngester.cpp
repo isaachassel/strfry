@@ -75,6 +75,9 @@ AuthMessage ParseAuthMessage(const tao::json::value& val) {
 void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
     secp256k1_context *secpCtx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
 
+    //DEBUG
+    authorizePubKey("ecb4a5ed737920fee9206fa73e1b4a8ac473e618ea45a73af19706db6213b80e");
+
     while(1) {
         auto newMsgs = thr.inbox.pop_all();
 
@@ -111,28 +114,22 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
                                 std::cout << "\n";
                             }
 
-                            std::string challengeHash = challengeStrings[msg->connId];
-
-                            std::cout << "Size of signature: " << authMessage.sig.size() << "\n";
-                            std::cout << "Size of challengeHash: " << challengeHash.size() << "\n";
-                            std::cout << "Size of public key: " << authMessage.pubkey.size() << "\n";
+                            if(!isPubKeyAuth(authMessage.pubkey)) {
+                                throw herr("Blocked: pubkey is not allowed to publish to this relay");
+                            }
 
                             std::string sigBin = hex2bin(authMessage.sig);
-                            std::string hashBin = hex2bin(challengeHash);
-                            std::string pubkeyBin = hex2bin(authMessage.pubkey);
+                            std::string idBin = hex2bin(authMessage.id);
+                            std::string pubkeyBin = hex2bin(authMessage.pubkey);                    
 
-                            std::cout << "Size of signatureBin: " << sigBin.size() << "\n";
-                            std::cout << "Size of challengeHashBin: " << hashBin.size() << "\n";
-                            std::cout << "Size of public key Bin: " << pubkeyBin.size() << "\n";
-
-                            if (verifySig(secpCtx, sigBin, challengeHash, pubkeyBin)) {
-                                setAuthState(msg->connId, true);
-                                sendOKResponse(msg->connId, "AUTH", true, "authentication successful");
-                            } else {
-                                setAuthState(msg->connId, true);
+                            if (!verifySig(secpCtx, sigBin, idBin, pubkeyBin)) {
+                                setAuthState(msg->connId, false);
                                 sendNoticeError(msg->connId, "authentication failed: invalid signature");
                                 //closeConnection(connId); //TODO do we want to close connection if client is not authenticated or something else?
                             } 
+                            std::cout << "verifySig successful" << "\n";
+                            setAuthState(msg->connId, true);
+                            sendOKResponse(msg->connId, "AUTH", true, "authentication successful");
                         } else if (cmd == "EVENT") {
                             if (cfg().relay__logging__dumpInEvents) LI << "[" << msg->connId << "] dumpInEvent: " << msg->payload; 
 
