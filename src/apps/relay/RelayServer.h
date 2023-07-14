@@ -9,7 +9,6 @@
 #include <hoytech/file_change_monitor.h>
 #include <uWebSockets/src/uWS.h>
 #include <tao/json.hpp>
-#include <quadrable.h>
 
 #include "golpe.h"
 
@@ -17,7 +16,7 @@
 #include "ThreadPool.h"
 #include "events.h"
 #include "filters.h"
-#include "yesstr.h"
+#include "Decompressor.h"
 
 
 
@@ -38,7 +37,10 @@ struct MsgWebsocket : NonCopyable {
         std::string evJson;
     };
 
-    using Var = std::variant<Send, SendBinary, SendEventToBatch>;
+    struct GracefulShutdown {
+    };
+
+    using Var = std::variant<Send, SendBinary, SendEventToBatch, GracefulShutdown>;
     Var msg;
     MsgWebsocket(Var &&msg_) : msg(std::move(msg_)) {}
 };
@@ -114,19 +116,31 @@ struct MsgReqMonitor : NonCopyable {
     MsgReqMonitor(Var &&msg_) : msg(std::move(msg_)) {}
 };
 
-struct MsgYesstr : NonCopyable {
-    struct SyncRequest {
+struct MsgNegentropy : NonCopyable {
+    struct NegOpen {
+        Subscription sub;
+        uint64_t idSize;
+        std::string negPayload;
+    };
+
+    struct NegMsg {
         uint64_t connId;
-        std::string yesstrMessage;
+        SubId subId;
+        std::string negPayload;
+    };
+
+    struct NegClose {
+        uint64_t connId;
+        SubId subId;
     };
 
     struct CloseConn {
         uint64_t connId;
     };
 
-    using Var = std::variant<SyncRequest, CloseConn>;
+    using Var = std::variant<NegOpen, NegMsg, NegClose, CloseConn>;
     Var msg;
-    MsgYesstr(Var &&msg_) : msg(std::move(msg_)) {}
+    MsgNegentropy(Var &&msg_) : msg(std::move(msg_)) {}
 };
 
 struct RelayServer {
@@ -142,8 +156,9 @@ struct RelayServer {
     ThreadPool<MsgWriter> tpWriter;
     ThreadPool<MsgReqWorker> tpReqWorker;
     ThreadPool<MsgReqMonitor> tpReqMonitor;
-    ThreadPool<MsgYesstr> tpYesstr;
+    ThreadPool<MsgNegentropy> tpNegentropy;
     std::thread cronThread;
+    std::thread signalHandlerThread;
 
     void run();
 
@@ -153,6 +168,7 @@ struct RelayServer {
     void ingesterProcessEvent(lmdb::txn &txn, uint64_t connId, std::string ipAddr, secp256k1_context *secpCtx, const tao::json::value &origJson, std::vector<MsgWriter> &output);
     void ingesterProcessReq(lmdb::txn &txn, uint64_t connId, const tao::json::value &origJson);
     void ingesterProcessClose(lmdb::txn &txn, uint64_t connId, const tao::json::value &origJson);
+    void ingesterProcessNegentropy(lmdb::txn &txn, Decompressor &decomp, uint64_t connId, const tao::json::value &origJson);
 
     void runWriter(ThreadPool<MsgWriter>::Thread &thr);
 
@@ -160,9 +176,11 @@ struct RelayServer {
 
     void runReqMonitor(ThreadPool<MsgReqMonitor>::Thread &thr);
 
-    void runYesstr(ThreadPool<MsgYesstr>::Thread &thr);
+    void runNegentropy(ThreadPool<MsgNegentropy>::Thread &thr);
 
     void runCron();
+
+    void runSignalHandler();
 
     // Utils (can be called by any thread)
 

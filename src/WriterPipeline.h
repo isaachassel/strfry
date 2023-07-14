@@ -16,13 +16,24 @@ struct WriterPipelineInput {
 
 struct WriterPipeline {
   public:
-    hoytech::protected_queue<WriterPipelineInput> inbox;
-    hoytech::protected_queue<bool> flushInbox;
+    uint64_t debounceDelayMilliseconds = 1'000;
+    uint64_t writeBatchSize = 1'000;
 
   private:
+    hoytech::protected_queue<WriterPipelineInput> validatorInbox;
     hoytech::protected_queue<EventToWrite> writerInbox;
+    hoytech::protected_queue<bool> flushInbox;
     std::thread validatorThread;
     std::thread writerThread;
+
+    std::condition_variable shutdownCv;
+    std::mutex shutdownMutex;
+    std::atomic<bool> shutdownRequested = false;
+    std::atomic<bool> shutdownComplete = false;
+
+    std::atomic<uint64_t> numLive = 0;
+    std::condition_variable backpressureCv;
+    std::mutex backpressureMutex;
 
   public:
     WriterPipeline() {
@@ -32,11 +43,13 @@ struct WriterPipeline {
             secp256k1_context *secpCtx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
 
             while (1) {
-                auto msgs = inbox.pop_all();
+                auto msgs = validatorInbox.pop_all();
 
                 for (auto &m : msgs) {
                     if (m.eventJson.is_null()) {
+                        shutdownRequested = true;
                         writerInbox.push_move({});
+                        shutdownCv.notify_all();
                         break;
                     }
 
@@ -47,6 +60,7 @@ struct WriterPipeline {
                         parseAndVerifyEvent(m.eventJson, secpCtx, true, true, flatStr, jsonStr);
                     } catch (std::exception &e) {
                         LW << "Rejected event: " << m.eventJson << " reason: " << e.what();
+                        numLive--;
                         continue;
                     }
 
@@ -58,18 +72,23 @@ struct WriterPipeline {
         writerThread = std::thread([&]() {
             setThreadName("Writer");
 
-            auto qdb = getQdbInstance();
-
             while (1) {
                 // Debounce
-                writerInbox.wait();
-                std::this_thread::sleep_for(std::chrono::milliseconds(1'000));
+
+                {
+                    auto numPendingElems = writerInbox.wait();
+
+                    if (!shutdownRequested && numPendingElems < writeBatchSize) {
+                        std::unique_lock<std::mutex> lk(shutdownMutex);
+                        shutdownCv.wait_for(lk, std::chrono::milliseconds(debounceDelayMilliseconds), [&]{return !!shutdownRequested;}); 
+                    }
+                }
+
                 auto newEvents = writerInbox.pop_all();
 
-                bool flush = false;
                 uint64_t written = 0, dups = 0;
 
-                // Collect a certain amount of records in a batch, push the rest back into the inbox
+                // Collect a certain amount of records in a batch, push the rest back into the writerInbox
                 // Pre-filter out dups in a read-only txn as an optimisation
 
                 std::vector<EventToWrite> newEventsToProc;
@@ -77,18 +96,23 @@ struct WriterPipeline {
                 {
                     auto txn = env.txn_ro();
 
-                    for (auto &event : newEvents) {
-                        if (newEventsToProc.size() > 1'000) {
-                            // Put the rest back in the inbox
+                    while (newEvents.size()) {
+                        if (newEventsToProc.size() >= writeBatchSize) {
+                            // Put the rest back in the writerInbox
                             writerInbox.unshift_move_all(newEvents);
                             newEvents.clear();
                             break;
                         }
 
+                        auto event = std::move(newEvents.front());
+                        newEvents.pop_front();
+
                         if (event.flatStr.size() == 0) {
-                            flush = true;
+                            shutdownComplete = true;
                             break;
                         }
+
+                        numLive--;
 
                         auto *flat = flatStrToFlatEvent(event.flatStr);
                         if (lookupEventById(txn, sv(flat->id()))) {
@@ -103,7 +127,7 @@ struct WriterPipeline {
                 if (newEventsToProc.size()) {
                     {
                         auto txn = env.txn_rw();
-                        writeEvents(txn, qdb, newEventsToProc);
+                        writeEvents(txn, newEventsToProc);
                         txn.commit();
                     }
 
@@ -114,15 +138,32 @@ struct WriterPipeline {
                     }
                 }
 
-                LI << "Writer: added: " << written << " dups: " << dups;
+                if (written || dups) LI << "Writer: added: " << written << " dups: " << dups;
 
-                if (flush) flushInbox.push_move(true);
+                if (shutdownComplete) {
+                    flushInbox.push_move(true);
+                    if (numLive != 0) LW << "numLive was not 0 after shutdown!";
+                }
+
+                backpressureCv.notify_all();
             }
         });
     }
 
+    void write(WriterPipelineInput &&inp) {
+        numLive++;
+        validatorInbox.push_move(std::move(inp));
+    }
+
     void flush() {
-        inbox.push_move({ tao::json::null, EventSourceType::None, "" });
+        validatorInbox.push_move({ tao::json::null, EventSourceType::None, "" });
         flushInbox.wait();
+    }
+
+    void wait() {
+        uint64_t drainUntil = writeBatchSize * 2;
+        if (numLive < drainUntil) return;
+        std::unique_lock<std::mutex> lk(backpressureMutex);
+        backpressureCv.wait_for(lk, std::chrono::milliseconds(50), [&]{return numLive < drainUntil;}); 
     }
 };

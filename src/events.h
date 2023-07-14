@@ -9,7 +9,7 @@
 
 
 
-inline bool isReplaceableEvent(uint64_t kind) {
+inline bool isReplaceableKind(uint64_t kind) {
     return (
         kind == 0 ||
         kind == 3 ||
@@ -18,7 +18,13 @@ inline bool isReplaceableEvent(uint64_t kind) {
     );
 }
 
-inline bool isEphemeralEvent(uint64_t kind) {
+inline bool isParamReplaceableKind(uint64_t kind) {
+    return (
+        (kind >= 30'000 && kind < 40'000)
+    );
+}
+
+inline bool isEphemeralKind(uint64_t kind) {
     return (
         (kind >= 20'000 && kind < 30'000)
     );
@@ -50,12 +56,6 @@ uint64_t getMostRecentLevId(lmdb::txn &txn);
 std::string_view decodeEventPayload(lmdb::txn &txn, Decompressor &decomp, std::string_view raw, uint32_t *outDictId, size_t *outCompressedSize);
 std::string_view getEventJson(lmdb::txn &txn, Decompressor &decomp, uint64_t levId);
 std::string_view getEventJson(lmdb::txn &txn, Decompressor &decomp, uint64_t levId, std::string_view eventPayload);
-
-inline quadrable::Key flatEventToQuadrableKey(const NostrIndex::Event *flat) {
-    uint64_t timestamp = flat->created_at();
-    if (timestamp > MAX_TIMESTAMP) throw herr("timestamp is too large to encode in quadrable key");
-    return quadrable::Key::fromIntegerAndHash(timestamp, sv(flat->id()).substr(0, 27));
-}
 
 
 
@@ -96,18 +96,25 @@ struct EventToWrite {
     EventSourceType sourceType;
     std::string sourceInfo;
     void *userData = nullptr;
-    quadrable::Key quadKey;
     EventWriteStatus status = EventWriteStatus::Pending;
     uint64_t levId = 0;
 
     EventToWrite() {}
 
     EventToWrite(std::string flatStr, std::string jsonStr, uint64_t receivedAt, EventSourceType sourceType, std::string sourceInfo, void *userData = nullptr) : flatStr(flatStr), jsonStr(jsonStr), receivedAt(receivedAt), sourceType(sourceType), sourceInfo(sourceInfo), userData(userData) {
+    }
+
+    std::string_view id() {
         const NostrIndex::Event *flat = flatbuffers::GetRoot<NostrIndex::Event>(flatStr.data());
-        quadKey = flatEventToQuadrableKey(flat);
+        return sv(flat->id());
+    }
+
+    uint64_t createdAt() {
+        const NostrIndex::Event *flat = flatbuffers::GetRoot<NostrIndex::Event>(flatStr.data());
+        return flat->created_at();
     }
 };
 
 
-void writeEvents(lmdb::txn &txn, quadrable::Quadrable &qdb, std::vector<EventToWrite> &evs, uint64_t logLevel = 1);
-void deleteEvent(lmdb::txn &txn, quadrable::Quadrable::UpdateSet &changes, defaultDb::environment::View_Event &ev);
+void writeEvents(lmdb::txn &txn, std::vector<EventToWrite> &evs, uint64_t logLevel = 1);
+bool deleteEvent(lmdb::txn &txn, uint64_t levId);

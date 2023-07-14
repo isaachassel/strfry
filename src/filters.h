@@ -49,8 +49,6 @@ struct FilterSetBytes {
     }
 
     bool doesMatch(std::string_view candidate) const {
-        if (candidate.size() == 0) throw herr("invalid candidate");
-
         // Binary search for upper-bound: https://en.cppreference.com/w/cpp/algorithm/upper_bound
 
         ssize_t first = 0, last = items.size(), curr;
@@ -61,7 +59,7 @@ struct FilterSetBytes {
             step = count / 2;
             curr += step;
 
-            bool comp = (uint8_t)candidate[0] != items[curr].firstByte
+            bool comp = (candidate.size() && items[curr].size && (uint8_t)candidate[0] != items[curr].firstByte)
                         ? (uint8_t)candidate[0] < items[curr].firstByte
                         : candidate < std::string_view(buf.data() + items[curr].offset, items[curr].size);
      
@@ -145,7 +143,7 @@ struct NostrFilter {
                     if (tag == 'p' || tag == 'e') {
                         tags.emplace(tag, FilterSetBytes(v, true, 32, 32));
                     } else {
-                        tags.emplace(tag, FilterSetBytes(v, false, 1, MAX_INDEXED_TAG_VAL_SIZE));
+                        tags.emplace(tag, FilterSetBytes(v, false, 0, MAX_INDEXED_TAG_VAL_SIZE));
                     }
                 } else {
                     throw herr("unindexed tag filter");
@@ -214,6 +212,8 @@ struct NostrFilter {
 struct NostrFilterGroup {
     std::vector<NostrFilter> filters;
 
+    NostrFilterGroup() {}
+
     // Note that this expects the full array, so the first two items are "REQ" and the subId
     NostrFilterGroup(const tao::json::value &req, uint64_t maxFilterLimit = cfg().relay__maxFilterLimit) {
         const auto &arr = req.get_array();
@@ -225,7 +225,7 @@ struct NostrFilterGroup {
         }
     }
 
-    // Hacky! Deserves a refactor
+    // FIXME refactor: Make unwrapped the default constructor
     static NostrFilterGroup unwrapped(tao::json::value filter, uint64_t maxFilterLimit = cfg().relay__maxFilterLimit) {
         if (!filter.is_array()) {
             filter = tao::json::value::array({ filter });

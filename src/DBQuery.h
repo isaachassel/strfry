@@ -324,6 +324,8 @@ struct DBQuery : NonCopyable {
             uint64_t startTime = hoytech::curr_time_us();
 
             bool complete = scanner->scan(txn, [&](uint64_t levId, std::string_view eventPayload){
+                if (f.limit == 0) return true;
+
                 // If this event came in after our query began, don't send it. It will be sent after the EOSE.
                 if (levId > sub.latestEventId) return false;
 
@@ -382,3 +384,12 @@ struct DBQuery : NonCopyable {
         return true;
     }
 };
+
+
+inline void foreachByFilter(lmdb::txn &txn, const tao::json::value &filter, std::function<void(uint64_t, std::string_view)> cb) {
+    DBQuery query(filter);
+
+    query.process(txn, [&](const auto &, uint64_t levId, std::string_view eventPayload){
+        cb(levId, eventPayload);
+    });
+}

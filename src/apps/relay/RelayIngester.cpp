@@ -74,6 +74,7 @@ AuthMessage ParseAuthMessage(const tao::json::value& val) {
 
 void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
     secp256k1_context *secpCtx = secp256k1_context_create(SECP256K1_CONTEXT_VERIFY);
+    Decompressor decomp;
 
     //DEBUG
     authorizePubKey("ecb4a5ed737920fee9206fa73e1b4a8ac473e618ea45a73af19706db6213b80e");
@@ -155,18 +156,14 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
                             } catch (std::exception &e) {
                                 sendNoticeError(msg->connId, std::string("bad close: ") + e.what());
                             }
+                        } else if (cmd.starts_with("NEG-")) {
+                            try {
+                                ingesterProcessNegentropy(txn, decomp, msg->connId, arr);
+                            } catch (std::exception &e) {
+                                sendNoticeError(msg->connId, std::string("negentropy error: ") + e.what());
+                            }
                         } else {
                             throw herr("unknown cmd");
-                        }
-                    } else if (msg->payload.starts_with("Y")) {
-                        verifyYesstrRequest(msg->payload);
-
-                        auto *req = parseYesstrRequest(msg->payload);
-
-                        if (req->payload_type() == Yesstr::RequestPayload::RequestPayload_RequestSync) {
-                            tpYesstr.dispatch(msg->connId, MsgYesstr{MsgYesstr::SyncRequest{ msg->connId, std::move(msg->payload) }});
-                        } else {
-                            throw herr("unrecognised yesstr request");
                         }
                     } else if (msg->payload == "\n") {
                         // Do nothing.
@@ -180,7 +177,7 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
             } else if (auto msg = std::get_if<MsgIngester::CloseConn>(&newMsg.msg)) {
                 auto connId = msg->connId;
                 tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::CloseConn{connId}});
-                tpYesstr.dispatch(connId, MsgYesstr{MsgYesstr::CloseConn{connId}});
+                tpNegentropy.dispatch(connId, MsgNegentropy{MsgNegentropy::CloseConn{connId}});
             }
         }
 
@@ -222,4 +219,58 @@ void RelayServer::ingesterProcessClose(lmdb::txn &txn, uint64_t connId, const ta
     if (arr.get_array().size() != 2) throw herr("arr too small/big");
 
     tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::RemoveSub{connId, SubId(arr[1].get_string())}});
+}
+
+void RelayServer::ingesterProcessNegentropy(lmdb::txn &txn, Decompressor &decomp, uint64_t connId, const tao::json::value &arr) {
+    if (arr.at(0) == "NEG-OPEN") {
+        if (arr.get_array().size() < 5) throw herr("negentropy query missing elements");
+
+        NostrFilterGroup filter;
+        auto maxFilterLimit = MAX_U64;
+
+        if (arr.at(2).is_string()) {
+            auto ev = lookupEventById(txn, from_hex(arr.at(2).get_string()));
+            if (!ev) {
+                sendToConn(connId, tao::json::to_string(tao::json::value::array({
+                    "NEG-ERR",
+                    arr[1].get_string(),
+                    "FILTER_NOT_FOUND"
+                })));
+
+                return;
+            }
+
+            tao::json::value json = tao::json::from_string(getEventJson(txn, decomp, ev->primaryKeyId));
+
+            try {
+                filter = std::move(NostrFilterGroup::unwrapped(tao::json::from_string(json.at("content").get_string()), maxFilterLimit));
+            } catch (std::exception &e) {
+                sendToConn(connId, tao::json::to_string(tao::json::value::array({
+                    "NEG-ERR",
+                    arr[1].get_string(),
+                    "FILTER_INVALID"
+                })));
+
+                return;
+            }
+        } else {
+            filter = std::move(NostrFilterGroup::unwrapped(arr.at(2), maxFilterLimit));
+        }
+
+        Subscription sub(connId, arr[1].get_string(), std::move(filter));
+
+        uint64_t idSize = arr.at(3).get_unsigned();
+        if (idSize < 8 || idSize > 32) throw herr("idSize out of range");
+
+        std::string negPayload = from_hex(arr.at(4).get_string());
+
+        tpNegentropy.dispatch(connId, MsgNegentropy{MsgNegentropy::NegOpen{std::move(sub), idSize, std::move(negPayload)}});
+    } else if (arr.at(0) == "NEG-MSG") {
+        std::string negPayload = from_hex(arr.at(2).get_string());
+        tpNegentropy.dispatch(connId, MsgNegentropy{MsgNegentropy::NegMsg{connId, SubId(arr[1].get_string()), std::move(negPayload)}});
+    } else if (arr.at(0) == "NEG-CLOSE") {
+        tpNegentropy.dispatch(connId, MsgNegentropy{MsgNegentropy::NegClose{connId, SubId(arr[1].get_string())}});
+    } else {
+        throw herr("unknown command");
+    }
 }

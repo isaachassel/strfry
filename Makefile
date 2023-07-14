@@ -1,6 +1,13 @@
-BIN = strfry
-OPT = -O3 -g
+BIN  ?= strfry
+APPS ?= dbutils relay mesh
+OPT  ?= -O3 -g
 
 include golpe/rules.mk
 
-LDLIBS += -lsecp256k1 -lb2 -lzstd
+LDLIBS += -lsecp256k1 -lzstd
+INCS += -Iexternal/negentropy/cpp
+
+build/StrfryTemplates.h: $(shell find src/tmpls/ -type f -name '*.tmpl')
+	perl golpe/external/templar/templar.pl src/tmpls/ strfrytmpl $@
+
+src/apps/relay/RelayWebsocket.o: build/StrfryTemplates.h

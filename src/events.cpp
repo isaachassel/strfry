@@ -21,14 +21,21 @@ std::string nostrJsonToFlat(const tao::json::value &v) {
 
     uint64_t expiration = 0;
 
+    if (isReplaceableKind(kind)) {
+        // Prepend virtual d-tag
+        tagsGeneral.emplace_back(NostrIndex::CreateTagGeneral(builder,
+            'd',
+            builder.CreateVector((uint8_t*)"", 0)
+        ));
+    }
+
     if (v.at("tags").get_array().size() > cfg().events__maxNumTags) throw herr("too many tags: ", v.at("tags").get_array().size());
     for (auto &tagArr : v.at("tags").get_array()) {
         auto &tag = tagArr.get_array();
-        if (tag.size() < 2) throw herr("too few fields in tag");
+        if (tag.size() < 1) throw herr("too few fields in tag");
 
         auto tagName = tag.at(0).get_string();
-
-        auto tagVal = tag.at(1).get_string();
+        auto tagVal = tag.size() >= 2 ? tag.at(1).get_string() : "";
 
         if (tagName == "e" || tagName == "p") {
             tagVal = from_hex(tagVal, false);
@@ -41,10 +48,9 @@ std::string nostrJsonToFlat(const tao::json::value &v) {
         } else if (tagName == "expiration") {
             if (expiration == 0) {
                 expiration = parseUint64(tagVal);
-                if (expiration == 0) expiration = 1; // special value to indicate expiration of 0 was set
+                if (expiration < 100) throw herr("invalid expiration");
             }
         } else if (tagName.size() == 1) {
-            if (tagVal.size() == 0) throw herr("tag val empty");
             if (tagVal.size() > cfg().events__maxTagValSize) throw herr("tag val too large: ", tagVal.size());
 
             if (tagVal.size() <= MAX_INDEXED_TAG_VAL_SIZE) {
@@ -54,6 +60,18 @@ std::string nostrJsonToFlat(const tao::json::value &v) {
                 ));
             }
         }
+    }
+
+    if (isParamReplaceableKind(kind)) {
+        // Append virtual d-tag
+        tagsGeneral.emplace_back(NostrIndex::CreateTagGeneral(builder,
+            'd',
+            builder.CreateVector((uint8_t*)"", 0)
+        ));
+    }
+
+    if (isEphemeralKind(kind)) {
+        expiration = 1;
     }
 
     // Create flatbuffer
@@ -125,11 +143,11 @@ void verifyEventTimestamp(const NostrIndex::Event *flat) {
     auto now = hoytech::curr_time_s();
     auto ts = flat->created_at();
 
-    uint64_t earliest = now - (isEphemeralEvent(flat->kind()) ? cfg().events__rejectEphemeralEventsOlderThanSeconds : cfg().events__rejectEventsOlderThanSeconds);
+    uint64_t earliest = now - (flat->expiration() == 1 ? cfg().events__rejectEphemeralEventsOlderThanSeconds : cfg().events__rejectEventsOlderThanSeconds);
     uint64_t latest = now + cfg().events__rejectEventsNewerThanSeconds;
 
     if (ts < earliest) throw herr("created_at too early");
-    if (ts > latest || ts > MAX_TIMESTAMP) throw herr("created_at too late");
+    if (ts > latest) throw herr("created_at too late");
 
     if (flat->expiration() != 0 && flat->expiration() <= now) throw herr("event expired");
 }
@@ -232,18 +250,23 @@ std::string_view getEventJson(lmdb::txn &txn, Decompressor &decomp, uint64_t lev
 
 
 
-void deleteEvent(lmdb::txn &txn, quadrable::Quadrable::UpdateSet &changes, defaultDb::environment::View_Event &ev) {
-    changes.del(flatEventToQuadrableKey(ev.flat_nested()));
-    env.dbi_EventPayload.del(txn, lmdb::to_sv<uint64_t>(ev.primaryKeyId));
-    env.delete_Event(txn, ev.primaryKeyId);
+bool deleteEvent(lmdb::txn &txn, uint64_t levId) {
+    bool deleted = env.dbi_EventPayload.del(txn, lmdb::to_sv<uint64_t>(levId));
+    env.delete_Event(txn, levId);
+    return deleted;
 }
 
 
 
-void writeEvents(lmdb::txn &txn, quadrable::Quadrable &qdb, std::vector<EventToWrite> &evs, uint64_t logLevel) {
-    std::sort(evs.begin(), evs.end(), [](auto &a, auto &b) { return a.quadKey < b.quadKey; });
+void writeEvents(lmdb::txn &txn, std::vector<EventToWrite> &evs, uint64_t logLevel) {
+    std::sort(evs.begin(), evs.end(), [](auto &a, auto &b) {
+        auto aC = a.createdAt();
+        auto bC = b.createdAt();
+        if (aC == bC) return a.id() < b.id();
+        return aC < bC;
+    });
 
-    auto changes = qdb.change();
+    std::vector<uint64_t> levIdsToDelete;
     std::string tmpBuf;
 
     for (size_t i = 0; i < evs.size(); i++) {
@@ -251,7 +274,7 @@ void writeEvents(lmdb::txn &txn, quadrable::Quadrable &qdb, std::vector<EventToW
 
         const NostrIndex::Event *flat = flatbuffers::GetRoot<NostrIndex::Event>(ev.flatStr.data());
 
-        if (lookupEventById(txn, sv(flat->id())) || (i != 0 && ev.quadKey == evs[i-1].quadKey)) {
+        if (lookupEventById(txn, sv(flat->id())) || (i != 0 && ev.id() == evs[i-1].id())) {
             ev.status = EventWriteStatus::Duplicate;
             continue;
         }
@@ -261,34 +284,20 @@ void writeEvents(lmdb::txn &txn, quadrable::Quadrable &qdb, std::vector<EventToW
             continue;
         }
 
-        if (isReplaceableEvent(flat->kind())) {
-            auto searchKey = makeKey_StringUint64Uint64(sv(flat->pubkey()), flat->kind(), MAX_U64);
+        {
+            std::optional<std::string> replace;
 
-            env.generic_foreachFull(txn, env.dbi_Event__pubkeyKind, searchKey, lmdb::to_sv<uint64_t>(MAX_U64), [&](auto k, auto v) {
-                ParsedKey_StringUint64Uint64 parsedKey(k);
-                if (parsedKey.s == sv(flat->pubkey()) && parsedKey.n1 == flat->kind()) {
-                    if (parsedKey.n2 < flat->created_at()) {
-                        auto otherEv = lookupEventByLevId(txn, lmdb::from_sv<uint64_t>(v));
-                        if (logLevel >= 1) LI << "Deleting event (replaceable). id=" << to_hex(sv(otherEv.flat_nested()->id()));
-                        deleteEvent(txn, changes, otherEv);
-                    } else {
-                        ev.status = EventWriteStatus::Replaced;
-                    }
+            if (isReplaceableKind(flat->kind()) || isParamReplaceableKind(flat->kind())) {
+                for (const auto &tagPair : *(flat->tagsGeneral())) {
+                    auto tagName = (char)tagPair->key();
+                    if (tagName != 'd') continue;
+                    replace = std::string(sv(tagPair->val()));
+                    break;
                 }
-                return false;
-            }, true);
-        } else {
-            std::string replace;
-
-            for (const auto &tagPair : *(flat->tagsGeneral())) {
-                auto tagName = (char)tagPair->key();
-                if (tagName != 'd') continue;
-                replace = std::string(sv(tagPair->val()));
-                break;
             }
 
-            if (replace.size()) {
-                auto searchStr = std::string(sv(flat->pubkey())) + replace;
+            if (replace) {
+                auto searchStr = std::string(sv(flat->pubkey())) + *replace;
                 auto searchKey = makeKey_StringUint64(searchStr, flat->kind());
 
                 env.generic_foreachFull(txn, env.dbi_Event__replace, searchKey, lmdb::to_sv<uint64_t>(MAX_U64), [&](auto k, auto v) {
@@ -296,9 +305,13 @@ void writeEvents(lmdb::txn &txn, quadrable::Quadrable &qdb, std::vector<EventToW
                     if (parsedKey.s == searchStr && parsedKey.n == flat->kind()) {
                         auto otherEv = lookupEventByLevId(txn, lmdb::from_sv<uint64_t>(v));
 
-                        if (otherEv.flat_nested()->created_at() < flat->created_at()) {
+                        auto thisTimestamp = flat->created_at();
+                        auto otherTimestamp = otherEv.flat_nested()->created_at();
+
+                        if (otherTimestamp < thisTimestamp ||
+                            (otherTimestamp == thisTimestamp && sv(flat->id()) < sv(otherEv.flat_nested()->id()))) {
                             if (logLevel >= 1) LI << "Deleting event (d-tag). id=" << to_hex(sv(otherEv.flat_nested()->id()));
-                            deleteEvent(txn, changes, otherEv);
+                            levIdsToDelete.push_back(otherEv.primaryKeyId);
                         } else {
                             ev.status = EventWriteStatus::Replaced;
                         }
@@ -316,7 +329,7 @@ void writeEvents(lmdb::txn &txn, quadrable::Quadrable &qdb, std::vector<EventToW
                     auto otherEv = lookupEventById(txn, sv(tagPair->val()));
                     if (otherEv && sv(otherEv->flat_nested()->pubkey()) == sv(flat->pubkey())) {
                         if (logLevel >= 1) LI << "Deleting event (kind 5). id=" << to_hex(sv(tagPair->val()));
-                        deleteEvent(txn, changes, *otherEv);
+                        levIdsToDelete.push_back(otherEv->primaryKeyId);
                     }
                 }
             }
@@ -330,11 +343,14 @@ void writeEvents(lmdb::txn &txn, quadrable::Quadrable &qdb, std::vector<EventToW
             tmpBuf += ev.jsonStr;
             env.dbi_EventPayload.put(txn, lmdb::to_sv<uint64_t>(ev.levId), tmpBuf);
 
-            changes.put(ev.quadKey, "");
-
             ev.status = EventWriteStatus::Written;
-        }
-    }
 
-    changes.apply(txn);
+            // Deletions happen after event was written to ensure levIds are not reused
+
+            for (auto levId : levIdsToDelete) deleteEvent(txn, levId);
+            levIdsToDelete.clear();
+        }
+
+        if (levIdsToDelete.size()) throw herr("unprocessed deletion");
+    }
 }

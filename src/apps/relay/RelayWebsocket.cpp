@@ -1,6 +1,7 @@
 #include <random>
 #include "RelayServer.h"
 
+#include "StrfryTemplates.h"
 #include "app_git_version.h"
 
 
@@ -53,20 +54,22 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
     uWS::Group<uWS::SERVER> *hubGroup;
     flat_hash_map<uint64_t, Connection*> connIdToConnection;
     uint64_t nextConnectionId = 1;
+    bool gracefulShutdown = false;
 
     std::string tempBuf;
     tempBuf.reserve(cfg().events__maxEventSize + MAX_SUBID_SIZE + 100);
 
 
+    tao::json::value supportedNips = tao::json::value::array({ 1, 2, 4, 9, 11, 12, 16, 20, 22, 28, 33, 40 });
 
-    auto getServerInfoHttpResponse = [ver = uint64_t(0), rendered = std::string("")]() mutable {
+    auto getServerInfoHttpResponse = [&supportedNips, ver = uint64_t(0), rendered = std::string("")]() mutable {
         if (ver != cfg().version()) {
             rendered = preGenerateHttpResponse("application/json", tao::json::to_string(tao::json::value({
                 { "name", cfg().relay__info__name },
                 { "description", cfg().relay__info__description },
                 { "pubkey", cfg().relay__info__pubkey },
                 { "contact", cfg().relay__info__contact },
-                { "supported_nips", tao::json::value::array({ 1, 9, 11, 12, 15, 16, 20, 22 }) },
+                { "supported_nips", supportedNips },
                 { "software", "git+https://github.com/hoytech/strfry.git" },
                 { "version", APP_GIT_VERSION },
             })));
@@ -76,7 +79,19 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
         return std::string_view(rendered); // memory only valid until next call
     };
 
-    const std::string defaultHttpResponse = preGenerateHttpResponse("text/plain", "Please use a Nostr client to connect.");
+    auto getLandingPageHttpResponse = [&supportedNips, ver = uint64_t(0), rendered = std::string("")]() mutable {
+        if (ver != cfg().version()) {
+            struct {
+                std::string supportedNips;
+                std::string version;
+            } ctx = { tao::json::to_string(supportedNips), APP_GIT_VERSION };
+
+            rendered = preGenerateHttpResponse("text/html", ::strfrytmpl::landing(ctx).str);
+            ver = cfg().version();
+        }
+
+        return std::string_view(rendered); // memory only valid until next call
+    };
 
 
 
@@ -98,7 +113,8 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
             auto info = getServerInfoHttpResponse();
             res->write(info.data(), info.size());
         } else {
-            res->write(defaultHttpResponse.data(), defaultHttpResponse.size());
+            auto landing = getLandingPageHttpResponse();
+            res->write(landing.data(), landing.size());
         }
     });
 
@@ -147,6 +163,7 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
         auto downComp = renderPercent(1.0 - (double)c->stats.bytesDownCompressed / c->stats.bytesDown);
 
         LI << "[" << connId << "] Disconnect from " << renderIP(c->ipAddr)
+           << " (" << code << "/" << (message ? std::string_view(message, length) : "-") << ")"
            << " UP: " << renderSize(c->stats.bytesUp) << " (" << upComp << " compressed)"
            << " DN: " << renderSize(c->stats.bytesDown) << " (" << downComp << " compressed)"
         ;
@@ -155,6 +172,14 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
 
         connIdToConnection.erase(connId);
         delete c;
+
+        if (gracefulShutdown) {
+            LI << "Graceful shutdown in progress: " << connIdToConnection.size() << " connections remaining";
+            if (connIdToConnection.size() == 0) {
+                LW << "All connections closed, shutting down";
+                ::exit(0);
+            }
+        }
     });
 
     hubGroup->onMessage2([&](uWS::WebSocket<uWS::SERVER> *ws, char *message, size_t length, uWS::OpCode opCode, size_t compressedSize) {
@@ -201,6 +226,10 @@ void RelayServer::runWebsocket(ThreadPool<MsgWebsocket>::Thread &thr) {
                     memcpy(p + 10, subIdSv.data(), subIdSv.size());
                     doSend(item.connId, std::string_view(p, 13 + subIdSv.size() + msg->evJson.size()), uWS::OpCode::TEXT);
                 }
+            } else if (std::get_if<MsgWebsocket::GracefulShutdown>(&newMsg.msg)) {
+                LW << "Initiating graceful shutdown: " << connIdToConnection.size() << " connections remaining";
+                gracefulShutdown = true;
+                hubGroup->stopListening();
             }
         }
     };

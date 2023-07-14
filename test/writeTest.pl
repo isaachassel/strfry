@@ -2,8 +2,13 @@
 
 use strict;
 
+use Carp;
+$SIG{ __DIE__ } = \&Carp::confess;
+
 use Data::Dumper;
 use JSON::XS;
+
+$Data::Dumper::Sortkeys = 1;
 
 
 my $ids = [
@@ -19,9 +24,9 @@ my $ids = [
 
 
 
-## Basic insert
 
 doTest({
+    desc => "Basic insert",
     events => [
         qq{--sec $ids->[0]->{sec} --content "hi" --kind 1 },
         qq{--sec $ids->[0]->{sec} --content "hi 2" --kind 1 },
@@ -29,9 +34,9 @@ doTest({
     verify => [ 0, 1, ],
 });
 
-## Replacement, newer timestamp
 
 doTest({
+    desc => "Replacement, newer timestamp",
     events => [
         qq{--sec $ids->[0]->{sec} --content "hi" --kind 10000 --created-at 5000 },
         qq{--sec $ids->[0]->{sec} --content "hi 2" --kind 10000 --created-at 5001 },
@@ -40,9 +45,10 @@ doTest({
     verify => [ 1, ],
 });
 
-## Replacement is dropped
+
 
 doTest({
+    desc => "Replacement is dropped",
     events => [
         qq{--sec $ids->[0]->{sec} --content "hi" --kind 10000 --created-at 5001 },
         qq{--sec $ids->[0]->{sec} --content "hi 2" --kind 10000 --created-at 5000 },
@@ -50,9 +56,9 @@ doTest({
     verify => [ 0, ],
 });
 
-## Doesn't replace some else's event
 
 doTest({
+    desc => "Doesn't replace some else's event",
     events => [
         qq{--sec $ids->[0]->{sec} --content "hi" --kind 10000 --created-at 5000 },
         qq{--sec $ids->[1]->{sec} --content "hi 2" --kind 10000 --created-at 5001 },
@@ -60,9 +66,9 @@ doTest({
     verify => [ 0, 1, ],
 });
 
-## Doesn't replace different kind
 
 doTest({
+    desc => "Doesn't replace different kind",
     events => [
         qq{--sec $ids->[0]->{sec} --content "hi" --kind 10001 --created-at 5000 },
         qq{--sec $ids->[1]->{sec} --content "hi 2" --kind 10000 --created-at 5001 },
@@ -71,9 +77,39 @@ doTest({
 });
 
 
-## Deletion
+doTest({
+    desc => "d tags are ignored in 10k-20k range",
+    events => [
+        qq{--sec $ids->[0]->{sec} --content "hi" --kind 10003 --created-at 5000 },
+        qq{--sec $ids->[0]->{sec} --content "hi 2" --kind 10003 --created-at 5001 --tag d 'myrepl' },
+    ],
+    verify => [ 1, ],
+});
 
 doTest({
+    desc => "Equal timestamps: replacement does not happen because new id > old id",
+    events => [
+        qq{--sec $ids->[0]->{sec} --content "c1" --kind 10000 --created-at 5000 },
+        qq{--sec $ids->[0]->{sec} --content "c2" --kind 10000 --created-at 5000 },
+    ],
+    assertIds => [qw/ 7c ae /],
+    verify => [ 0, ],
+});
+
+doTest({
+    desc => "Equal timestamps: replacement does happen because new id < old id",
+    events => [
+        qq{--sec $ids->[0]->{sec} --content "c1" --kind 10000 --created-at 5000 },
+        qq{--sec $ids->[0]->{sec} --content "c4" --kind 10000 --created-at 5000 },
+    ],
+    assertIds => [qw/ 7c 63 /],
+    verify => [ 1, ],
+});
+
+
+
+doTest({
+    desc => "Deletion",
     events => [
         qq{--sec $ids->[0]->{sec} --content "hi" --kind 1 --created-at 5000 },
         qq{--sec $ids->[0]->{sec} --content "hi" --kind 1 --created-at 5001 },
@@ -83,9 +119,21 @@ doTest({
     verify => [ 1, 3, ],
 });
 
-## Can't delete someone else's event
 
 doTest({
+    desc => "Deletion, duplicate",
+    events => [
+        qq{--sec $ids->[0]->{sec} --content "hi" --kind 1 --created-at 5000 },
+        qq{--sec $ids->[0]->{sec} --content "hi" --kind 1 --created-at 5001 },
+        qq{--sec $ids->[0]->{sec} --content "hi" --kind 1 --created-at 5002 },
+        qq{--sec $ids->[0]->{sec} --content "blah" --kind 5 --created-at 6000 -e EV_2 -e EV_2 },
+    ],
+    verify => [ 0, 1, 3, ],
+});
+
+
+doTest({
+    desc => "Can't delete someone else's event",
     events => [
         qq{--sec $ids->[0]->{sec} --content "hi" --kind 1 --created-at 5000 },
         qq{--sec $ids->[1]->{sec} --content "blah" --kind 5 --created-at 6000 -e EV_0 },
@@ -93,9 +141,9 @@ doTest({
     verify => [ 0, 1, ],
 });
 
-## Deletion prevents re-adding same event
 
 doTest({
+    desc => "Deletion prevents re-adding same event",
     events => [
         qq{--sec $ids->[0]->{sec} --content "hi" --kind 1 --created-at 5000 },
         qq{--sec $ids->[0]->{sec} --content "blah" --kind 5 --created-at 6000 -e EV_0 },
@@ -106,61 +154,85 @@ doTest({
 
 
 
-## Parameterized Replaceable Events
 
 doTest({
+    desc => "Parameterized Replaceable Events",
     events => [
-        qq{--sec $ids->[0]->{sec} --content "hi1" --kind 1 --created-at 5000 --tag d myrepl },
-        qq{--sec $ids->[0]->{sec} --content "hi2" --kind 1 --created-at 5001 --tag d myrepl },
+        qq{--sec $ids->[0]->{sec} --content "hi1" --kind 30001 --created-at 5000 --tag d myrepl },
+        qq{--sec $ids->[0]->{sec} --content "hi2" --kind 30001 --created-at 5001 --tag d myrepl },
     ],
     verify => [ 1, ],
 });
 
-## d tags have to match
-
 doTest({
+    desc => "d tag only works in range 30k-40k",
     events => [
         qq{--sec $ids->[0]->{sec} --content "hi1" --kind 1 --created-at 5000 --tag d myrepl },
-        qq{--sec $ids->[0]->{sec} --content "hi2" --kind 1 --created-at 5001 --tag d myrepl2 },
-        qq{--sec $ids->[0]->{sec} --content "hi3" --kind 1 --created-at 5002 --tag d myrepl },
+        qq{--sec $ids->[0]->{sec} --content "hi2" --kind 1 --created-at 5001 --tag d myrepl },
+    ],
+    verify => [ 0, 1, ],
+});
+
+doTest({
+    desc => "d tags have to match",
+    events => [
+        qq{--sec $ids->[0]->{sec} --content "hi1" --kind 30001 --created-at 5000 --tag d myrepl },
+        qq{--sec $ids->[0]->{sec} --content "hi2" --kind 30001 --created-at 5001 --tag d myrepl2 },
+        qq{--sec $ids->[0]->{sec} --content "hi3" --kind 30001 --created-at 5002 --tag d myrepl },
     ],
     verify => [ 1, 2, ],
 });
 
-## Kinds have to match
 
 doTest({
+    desc => "Kinds have to match",
     events => [
-        qq{--sec $ids->[0]->{sec} --content "hi1" --kind 1 --created-at 5000 --tag d myrepl },
-        qq{--sec $ids->[0]->{sec} --content "hi2" --kind 2 --created-at 5001 --tag d myrepl },
+        qq{--sec $ids->[0]->{sec} --content "hi1" --kind 30001 --created-at 5000 --tag d myrepl },
+        qq{--sec $ids->[0]->{sec} --content "hi2" --kind 30002 --created-at 5001 --tag d myrepl },
     ],
     verify => [ 0, 1, ],
 });
 
-## Pubkeys have to match
 
 doTest({
+    desc => "Pubkeys have to match",
     events => [
-        qq{--sec $ids->[0]->{sec} --content "hi1" --kind 1 --created-at 5000 --tag d myrepl },
-        qq{--sec $ids->[1]->{sec} --content "hi2" --kind 1 --created-at 5001 --tag d myrepl },
+        qq{--sec $ids->[0]->{sec} --content "hi1" --kind 30001 --created-at 5000 --tag d myrepl },
+        qq{--sec $ids->[1]->{sec} --content "hi2" --kind 30001 --created-at 5001 --tag d myrepl },
     ],
     verify => [ 0, 1, ],
 });
 
-## Timestamp
 
 doTest({
+    desc => "Newer param replaceable event isn't replaced",
     events => [
-        qq{--sec $ids->[0]->{sec} --content "hi1" --kind 1 --created-at 5001 --tag d myrepl },
-        qq{--sec $ids->[0]->{sec} --content "hi2" --kind 1 --created-at 5000 --tag d myrepl },
+        qq{--sec $ids->[0]->{sec} --content "hi1" --kind 30001 --created-at 5001 --tag d myrepl },
+        qq{--sec $ids->[0]->{sec} --content "hi2" --kind 30001 --created-at 5000 --tag d myrepl },
     ],
     verify => [ 0, ],
 });
 
 
+doTest({
+    desc => "Explicit empty d tag",
+    events => [
+        qq{--sec $ids->[0]->{sec} --content "hi" --kind 30003 --created-at 5000 },
+        qq{--sec $ids->[0]->{sec} --content "hi 2" --kind 30003 --created-at 5001 --tag d '' },
+        qq{--sec $ids->[0]->{sec} --content "hi" --kind 30003 --created-at 5000 },
+    ],
+    verify => [ 1, ],
+});
+
+
+
+print "\nOK\n";
+
 
 sub doTest {
     my $spec = shift;
+
+    print "* ", ($spec->{desc} || 'unnamed'), "\n";
 
     cleanDb();
 
@@ -169,6 +241,10 @@ sub doTest {
     for my $ev (@{ $spec->{events} }) {
         $ev =~ s{EV_(\d+)}{$eventIds->[$1]}eg;
         push @$eventIds, addEvent($ev);
+    }
+
+    for (my $i = 0; $i < @{ $spec->{assertIds} || [] }; $i++) {
+        die "assertId incorrect" unless rindex($eventIds->[$i], $spec->{assertIds}->[$i], 0) == 0;
     }
 
     my $finalEventIds = [];
@@ -200,11 +276,12 @@ sub addEvent {
 
     my $eventJson = `cat test-eventXYZ.json`;
 
-    system(qq{ <test-eventXYZ.json ./strfry --config test/strfry.conf import --no-gc 2>/dev/null });
+    system(qq{ <test-eventXYZ.json ./strfry --config test/strfry.conf import 2>/dev/null });
 
     system(qq{ rm test-eventXYZ.json });
 
     my $event = decode_json($eventJson);
+    print Dumper($event) if $ENV{DUMP_EVENTS};
 
     return $event->{id};
 }
