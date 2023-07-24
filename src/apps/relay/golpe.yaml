@@ -23,10 +23,10 @@ config:
     default: "This is a strfry instance."
   - name: relay__info__pubkey
     desc: "NIP-11: Administrative nostr pubkey, for contact purposes"
-    default: "unset"
+    default: ""
   - name: relay__info__contact
     desc: "NIP-11: Alternative administrative contact (email, website, etc)"
-    default: "unset"
+    default: ""
 
   - name: relay__maxWebsocketPayloadSize
     desc: "Maximum accepted incoming websocket frame size (should be larger than max event)"
@@ -77,6 +77,9 @@ config:
   - name: relay__logging__dbScanPerf
     desc: "Log performance metrics for initial REQ database scans"
     default: false
+  - name: relay__logging__invalidEvents
+    desc: "Log reason for invalid event rejection? Can be disabled to silence excessive logging"
+    default: true
 
   - name: relay__numThreads__ingester
     desc: Ingester threads: route incoming requests, validate events/sigs
@@ -94,3 +97,7 @@ config:
     desc: negentropy threads: Handle negentropy protocol messages
     default: 2
     noReload: true
+
+  - name: relay__negentropy__maxSyncEvents
+    desc: "Maximum records that sync will process before returning an error"
+    default: 1000000

@@ -233,7 +233,7 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
                                 ingesterProcessEvent(txn, msg->connId, msg->ipAddr, secpCtx, arr[1], writerMsgs);
                             } catch (std::exception &e) {
                                 sendOKResponse(msg->connId, arr[1].at("id").get_string(), false, std::string("invalid: ") + e.what());
-                                LI << "Rejected invalid event: " << e.what();
+                                if (cfg().relay__logging__invalidEvents) LI << "Rejected invalid event: " << e.what();
                             }
                         } else if (cmd == "REQ") {
                             if (cfg().relay__logging__dumpInReqs) LI << "[" << msg->connId << "] dumpInReq: " << msg->payload; 
@@ -271,6 +271,7 @@ void RelayServer::runIngester(ThreadPool<MsgIngester>::Thread &thr) {
                 }
             } else if (auto msg = std::get_if<MsgIngester::CloseConn>(&newMsg.msg)) {
                 auto connId = msg->connId;
+                tpWriter.dispatch(connId, MsgWriter{MsgWriter::CloseConn{connId}});
                 tpReqWorker.dispatch(connId, MsgReqWorker{MsgReqWorker::CloseConn{connId}});
                 tpNegentropy.dispatch(connId, MsgNegentropy{MsgNegentropy::CloseConn{connId}});
             }
@@ -321,7 +322,7 @@ void RelayServer::ingesterProcessNegentropy(lmdb::txn &txn, Decompressor &decomp
         if (arr.get_array().size() < 5) throw herr("negentropy query missing elements");
 
         NostrFilterGroup filter;
-        auto maxFilterLimit = MAX_U64;
+        auto maxFilterLimit = cfg().relay__negentropy__maxSyncEvents + 1;
 
         if (arr.at(2).is_string()) {
             auto ev = lookupEventById(txn, from_hex(arr.at(2).get_string()));

@@ -72,7 +72,11 @@ struct MsgWriter : NonCopyable {
         std::string jsonStr;
     };
 
-    using Var = std::variant<AddEvent>;
+    struct CloseConn {
+        uint64_t connId;
+    };
+
+    using Var = std::variant<AddEvent, CloseConn>;
     Var msg;
     MsgWriter(Var &&msg_) : msg(std::move(msg_)) {}
 };
@@ -242,7 +246,7 @@ struct RelayServer {
     }
 
 
-    bool isPubKeyAuth(const std::string& pubkey) {
+    bool isPubKeyAuth(const std::string& pubkey) { 
         std::lock_guard<std::mutex> lock(authMtx);
         return authorizedPubKeys.find(pubkey) != authorizedPubKeys.end();
     }
