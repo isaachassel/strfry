@@ -143,4 +143,15 @@ config:
   - name: relay__authorization__nip42__dms
     desc: "Send DMs to everybody"
     default: 
-    
+  - name: auth__msg__kind
+    desc: "Auth msg kind for NIP-42" 
+    default: 22242
+  - name: auth__msg__timestamp__tolerance
+    desc: "Auth msg timestamp must be within +- this many minutes of the current time"
+    default: 10   
+  - name: auth__msg__relay__tag
+    desc: "Auth msg tag that contains relay URL"
+    default: "relay" 
+  - name: auth__msg__challenge__tag
+    desc: "Auth msg tag that contains challenge string"
+    default: "challenge"  

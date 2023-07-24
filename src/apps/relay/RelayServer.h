@@ -4,9 +4,11 @@
 #include <memory>
 #include <algorithm>
 
+#include <arpa/inet.h>
 #include <hoytech/time.h>
 #include <hoytech/hex.h>
 #include <hoytech/file_change_monitor.h>
+#include <netdb.h>
 #include <uWebSockets/src/uWS.h>
 #include <tao/json.hpp>
 
@@ -226,6 +228,19 @@ struct RelayServer {
         tpWebsocket.dispatch(0, MsgWebsocket{MsgWebsocket::Send{connId, std::move(tao::json::to_string(reply))}});
         hubTrigger->send();
     }
+
+    bool doChallengeStringsMatch(uint64_t connId, const std::string& challengeString) {
+        std::lock_guard<std::mutex> lock(authMtx);
+        
+        auto it = challengeStrings.find(connId);
+        if(it != challengeStrings.end()) {
+            return it->second == challengeString;
+        }
+        
+        // if connId is not found in the map, return false
+        return false;
+    }
+
 
     bool isPubKeyAuth(const std::string& pubkey) {
         std::lock_guard<std::mutex> lock(authMtx);
